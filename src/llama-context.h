@@ -6,6 +6,7 @@
 #include "llama-graph.h"
 #include "llama-adapter.h"
 #include "llama-impl.h"
+#include "llama-kv-evict.h"
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -374,4 +375,6 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+
+    std::unique_ptr<llama_kv_evict_mgr> kv_evict_mgr;
 };

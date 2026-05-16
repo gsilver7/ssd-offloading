@@ -302,6 +302,17 @@ llama_context::llama_context(
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
+
+        // SSD KV-cache offloading
+        {
+            const char * ssd_path = std::getenv("LLAMA_KV_SSD_PATH");
+            if (ssd_path && ssd_path[0]) {
+                auto * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
+                if (kv_cache) {
+                    kv_evict_mgr = std::make_unique<llama_kv_evict_mgr>(*kv_cache, ssd_path);
+                }
+            }
+        }
     }
 
     // init backends
@@ -388,6 +399,7 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+    if (kv_evict_mgr) { kv_evict_mgr->print_stats(); }
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
@@ -1685,6 +1697,22 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // handle any pending shifts/copies
     memory_update(false);
 
+    // ensure evicted sequences are restored before decode
+    if (kv_evict_mgr) {
+        std::vector<llama_seq_id> batch_seqs;
+        const auto & batch = balloc->get_batch();
+        for (int32_t i = 0; i < batch.n_tokens; ++i) {
+            for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
+                if (batch.seq_id[i][s] >= 0) {
+                    batch_seqs.push_back(batch.seq_id[i][s]);
+                }
+            }
+        }
+        std::sort(batch_seqs.begin(), batch_seqs.end());
+        batch_seqs.erase(std::unique(batch_seqs.begin(), batch_seqs.end()), batch_seqs.end());
+        kv_evict_mgr->ensure_restored(batch_seqs);
+    }
+
     llama_memory_context_ptr mctx;
 
     while (true) {
@@ -1715,6 +1743,20 @@ int llama_context::decode(const llama_batch & batch_inp) {
                         }
                     }
 
+                    // try SSD eviction to free space
+                    if (kv_evict_mgr) {
+                        std::vector<llama_seq_id> active_seqs;
+                        const auto & batch = balloc->get_batch();
+                        for (int32_t i = 0; i < batch.n_tokens; ++i) {
+                            for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
+                                active_seqs.push_back(batch.seq_id[i][s]);
+                            }
+                        }
+                        std::sort(active_seqs.begin(), active_seqs.end());
+                        active_seqs.erase(std::unique(active_seqs.begin(), active_seqs.end()), active_seqs.end());
+                        if (kv_evict_mgr->try_evict(active_seqs) > 0) { continue; }
+                    }
+
                     LLAMA_LOG_WARN("%s: failed to find a memory slot for batch of size %d\n", __func__, balloc->get_n_tokens());
 
                     return 1;
@@ -1728,6 +1770,16 @@ int llama_context::decode(const llama_batch & batch_inp) {
         }
 
         break;
+    }
+
+    // update LRU timestamps
+    if (kv_evict_mgr) {
+        const auto & batch = balloc->get_batch();
+        for (int32_t i = 0; i < batch.n_tokens; ++i) {
+            for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
+                kv_evict_mgr->touch_seq(batch.seq_id[i][s]);
+            }
+        }
     }
 
     // reserve output buffer

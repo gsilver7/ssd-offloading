@@ -23,6 +23,8 @@ add_library(llama
             llama-impl.cpp
             llama-io.cpp
             llama-kv-cache.cpp
+            llama-kv-evict.cpp
+            llama-ssd-offload.cpp
             llama-kv-cache-iswa.cpp
             llama-memory.cpp
             llama-memory-hybrid.cpp
@@ -57,4 +59,15 @@ if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
     target_compile_definitions(llama PUBLIC  LLAMA_SHARED)
+endif()
+
+option(LLAMA_SSD_NVTX "Enable NVTX markers for SSD profiling" OFF)
+if (LLAMA_SSD_NVTX)
+    find_path(NVTX_INCLUDE_DIR nvToolsExt.h HINTS ${CUDAToolkit_ROOT}/include /usr/local/cuda/include)
+    find_library(NVTX_LIB nvToolsExt HINTS ${CUDAToolkit_ROOT}/lib64 /usr/local/cuda/lib64)
+    if (NVTX_INCLUDE_DIR AND NVTX_LIB)
+        target_compile_definitions(llama PRIVATE LLAMA_SSD_NVTX)
+        target_include_directories(llama PRIVATE ${NVTX_INCLUDE_DIR})
+        target_link_libraries(llama PRIVATE ${NVTX_LIB})
+    endif()
 endif()

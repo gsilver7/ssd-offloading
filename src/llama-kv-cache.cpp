@@ -2500,3 +2500,101 @@ void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {
 void llama_kv_cache_context::set_input_v_rot(ggml_tensor * dst) const {
     kv->set_input_v_rot(dst);
 }
+
+// ─── SSD offload API implementations ────────────────────────────────────────
+
+size_t llama_kv_cache::get_n_kv_layers() const {
+    return layers.size();
+}
+
+std::vector<int32_t> llama_kv_cache::get_kv_model_layer_ids() const {
+    std::vector<int32_t> ids;
+    ids.reserve(layers.size());
+    for (auto & [il, idx] : map_layer_ids) {
+        // Only include canonical entries where the layer was originally created for model layer il
+        if (layers[(size_t)idx].il == (uint32_t)il) {
+            ids.push_back(il);
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+ggml_tensor * llama_kv_cache::get_k_tensor(int32_t il, uint32_t strm) const {
+    auto it = map_layer_ids.find(il);
+    if (it == map_layer_ids.end()) return nullptr;
+    const auto & kl = layers[(size_t)it->second];
+    if (strm >= kl.k_stream.size()) return nullptr;
+    return kl.k_stream[strm];
+}
+
+ggml_tensor * llama_kv_cache::get_v_tensor(int32_t il, uint32_t strm) const {
+    auto it = map_layer_ids.find(il);
+    if (it == map_layer_ids.end()) return nullptr;
+    const auto & kl = layers[(size_t)it->second];
+    if (strm >= kl.v_stream.size()) return nullptr;
+    return kl.v_stream[strm];
+}
+
+size_t llama_kv_cache::get_k_cell_bytes(int32_t il) const {
+    return ggml_row_size(type_k(), hparams.n_embd_k_gqa(il));
+}
+
+size_t llama_kv_cache::get_v_cell_bytes(int32_t il) const {
+    auto * vt = get_v_tensor(il, 0);
+    if (!vt) return 0;
+    return vt->nb[1];
+}
+
+uint32_t llama_kv_cache::get_seq_stream(llama_seq_id seq_id) const {
+    GGML_ASSERT(seq_id >= 0 && (size_t)seq_id < seq_to_stream.size());
+    return seq_to_stream[(size_t)seq_id];
+}
+
+std::vector<uint32_t> llama_kv_cache::get_seq_cell_indices(llama_seq_id seq_id, uint32_t strm) const {
+    std::vector<uint32_t> result;
+    if (strm >= v_cells.size()) return result;
+    const auto & cells = v_cells[strm];
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        if (!cells.is_empty(i) && cells.seq_has(i, seq_id)) {
+            result.push_back(i);
+        }
+    }
+    return result;
+}
+
+llama_pos llama_kv_cache::get_cell_pos(uint32_t cell_idx, uint32_t strm) const {
+    GGML_ASSERT(strm < v_cells.size());
+    return v_cells[strm].pos_get(cell_idx);
+}
+
+std::vector<uint32_t> llama_kv_cache::claim_cells(llama_seq_id seq_id,
+                                                    const std::vector<llama_pos> & positions,
+                                                    uint32_t strm) {
+    std::vector<uint32_t> claimed;
+    if (strm >= v_cells.size()) return claimed;
+    claimed.reserve(positions.size());
+
+    auto & cells = v_cells[strm];
+    auto & head  = v_heads[strm];
+    size_t pos_idx = 0;
+
+    for (uint32_t i = 0; i < cells.size() && pos_idx < positions.size(); ++i) {
+        if (cells.is_empty(i)) {
+            cells.pos_set(i, positions[pos_idx]);
+            cells.seq_add(i, seq_id);
+            claimed.push_back(i);
+            ++pos_idx;
+            if (i < head) head = i;
+        }
+    }
+
+    if (claimed.size() < positions.size()) {
+        // Not enough space — undo
+        for (uint32_t idx : claimed) {
+            cells.rm(idx);
+        }
+        claimed.clear();
+    }
+    return claimed;
+}

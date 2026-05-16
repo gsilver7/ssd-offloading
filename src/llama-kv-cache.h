@@ -155,6 +155,20 @@ public:
     ggml_type type_k() const;
     ggml_type type_v() const;
 
+    // SSD offload API
+    size_t                get_n_kv_layers() const;
+    std::vector<int32_t>  get_kv_model_layer_ids() const;
+    ggml_tensor *         get_k_tensor(int32_t il, uint32_t strm = 0) const;
+    ggml_tensor *         get_v_tensor(int32_t il, uint32_t strm = 0) const;
+    size_t                get_k_cell_bytes(int32_t il) const;
+    size_t                get_v_cell_bytes(int32_t il) const;
+    uint32_t              get_seq_stream(llama_seq_id seq_id) const;
+    std::vector<uint32_t> get_seq_cell_indices(llama_seq_id seq_id, uint32_t strm) const;
+    llama_pos             get_cell_pos(uint32_t cell_idx, uint32_t strm = 0) const;
+    std::vector<uint32_t> claim_cells(llama_seq_id seq_id,
+                                      const std::vector<llama_pos> & positions,
+                                      uint32_t strm = 0);
+
     //
     // graph_build API
     //
