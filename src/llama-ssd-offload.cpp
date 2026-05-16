@@ -91,8 +91,9 @@ bool llama_ssd_kv_file::write_kv(const void * src, size_t nbytes, off_t offset) 
 
     if (staging) free(staging);
 
-    if (written < 0) {
-        perror("[llama-ssd] pwrite");
+    if (written != (ssize_t)aligned_size) {
+        if (written < 0) perror("[llama-ssd] pwrite");
+        else fprintf(stderr, "[llama-ssd] pwrite: partial write (%zd / %zu bytes)\n", written, aligned_size);
         return false;
     }
 
@@ -126,8 +127,9 @@ bool llama_ssd_kv_file::read_kv(void * dst, size_t nbytes, off_t offset) {
         free(staging);
     }
 
-    if (got < 0) {
-        perror("[llama-ssd] pread");
+    if (got < (ssize_t)nbytes) {
+        if (got < 0) perror("[llama-ssd] pread");
+        else fprintf(stderr, "[llama-ssd] pread: partial read (%zd / %zu bytes)\n", got, nbytes);
         return false;
     }
 
@@ -137,6 +139,8 @@ bool llama_ssd_kv_file::read_kv(void * dst, size_t nbytes, off_t offset) {
 }
 
 bool llama_ssd_kv_file::read_blob(void * dst, size_t nbytes, off_t offset) {
-    // Single-call blob read — identical behaviour to read_kv
+    // OPT5: single pread for the entire sequence blob.
+    // Intentionally delegates to read_kv — the distinction is semantic (one call
+    // for the whole blob vs. per-layer slices), not structural at this layer.
     return read_kv(dst, nbytes, offset);
 }

@@ -2579,13 +2579,14 @@ std::vector<uint32_t> llama_kv_cache::claim_cells(llama_seq_id seq_id,
     auto & head  = v_heads[strm];
     size_t pos_idx = 0;
 
+    uint32_t last_claimed = 0;
     for (uint32_t i = 0; i < cells.size() && pos_idx < positions.size(); ++i) {
         if (cells.is_empty(i)) {
             cells.pos_set(i, positions[pos_idx]);
             cells.seq_add(i, seq_id);
             claimed.push_back(i);
+            last_claimed = i;
             ++pos_idx;
-            if (i < head) head = i;
         }
     }
 
@@ -2595,6 +2596,9 @@ std::vector<uint32_t> llama_kv_cache::claim_cells(llama_seq_id seq_id,
             cells.rm(idx);
         }
         claimed.clear();
+    } else {
+        // Advance head past the last claimed cell for efficient next search
+        head = (last_claimed + 1) % cells.size();
     }
     return claimed;
 }

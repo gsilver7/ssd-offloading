@@ -222,8 +222,10 @@ void llama_kv_evict_mgr::do_scatter(const void * buf,
                                      const std::vector<uint32_t> & new_cells,
                                      const EvictEntry & entry)
 {
-    const size_t  n_cells = new_cells.size();
-    const char *  p       = static_cast<const char *>(buf);
+    const size_t  n_cells  = new_cells.size();
+    const char *  p        = static_cast<const char *>(buf);
+    const bool    opt_slab = (std::getenv("LLAMA_SSD_OPT_SLAB") != nullptr);
+    const bool    contig   = opt_slab && cells_contiguous(new_cells);
 
     for (int32_t il : kv_.get_kv_model_layer_ids()) {
         // K
@@ -231,8 +233,12 @@ void llama_kv_evict_mgr::do_scatter(const void * buf,
         size_t k_cell = kv_.get_k_cell_bytes(il);
         size_t k_slab = n_cells * k_cell;
         if (kt) {
-            for (size_t j = 0; j < n_cells; ++j) {
-                ggml_backend_tensor_set(kt, p + j*k_cell, new_cells[j]*k_cell, k_cell);
+            if (contig) {
+                ggml_backend_tensor_set(kt, p, new_cells[0]*k_cell, k_slab);
+            } else {
+                for (size_t j = 0; j < n_cells; ++j) {
+                    ggml_backend_tensor_set(kt, p + j*k_cell, new_cells[j]*k_cell, k_cell);
+                }
             }
         }
         p += k_slab;
@@ -242,8 +248,12 @@ void llama_kv_evict_mgr::do_scatter(const void * buf,
         size_t v_cell = kv_.get_v_cell_bytes(il);
         size_t v_slab = n_cells * v_cell;
         if (vt) {
-            for (size_t j = 0; j < n_cells; ++j) {
-                ggml_backend_tensor_set(vt, p + j*v_cell, new_cells[j]*v_cell, v_cell);
+            if (contig) {
+                ggml_backend_tensor_set(vt, p, new_cells[0]*v_cell, v_slab);
+            } else {
+                for (size_t j = 0; j < n_cells; ++j) {
+                    ggml_backend_tensor_set(vt, p + j*v_cell, new_cells[j]*v_cell, v_cell);
+                }
             }
         }
         p += v_slab;
