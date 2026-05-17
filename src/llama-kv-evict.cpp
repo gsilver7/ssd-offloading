@@ -277,6 +277,17 @@ bool llama_kv_evict_mgr::do_evict(llama_seq_id seq_id) {
 #endif
     const bool opt_prefetch    = (std::getenv("LLAMA_SSD_OPT_PREFETCH")!= nullptr);
 
+    // build config label for NVTX markers
+    std::string cfg_label;
+#ifdef GGML_USE_CUDA
+    if (opt_batch_async) { cfg_label = "OPT2_BATCH"; }
+    else
+#endif
+    if (opt_pinned)   { cfg_label = "OPT3_PINNED"; }
+    else if (opt_prefetch) { cfg_label = "OPT4_PREFETCH"; }
+    else if (opt_slab)     { cfg_label = "OPT1_SLAB"; }
+    else                   { cfg_label = "BASELINE"; }
+
     const double t_total_start = now_ms();
 
     uint32_t strm = kv_.get_seq_stream(seq_id);
@@ -315,7 +326,7 @@ bool llama_kv_evict_mgr::do_evict(llama_seq_id seq_id) {
         {
             cudaStream_t cs;
             cudaStreamCreate(&cs);
-            NVTX_PUSH("EVICT[BATCH] D2D");
+            NVTX_PUSH((cfg_label + ": EVICT D2D").c_str());
             size_t blob_off = 0;
             for (int32_t il : kv_.get_kv_model_layer_ids()) {
                 auto * kt   = kv_.get_k_tensor(il, strm);
@@ -355,7 +366,7 @@ bool llama_kv_evict_mgr::do_evict(llama_seq_id seq_id) {
                 blob_off += v_slab;
             }
             NVTX_POP();
-            NVTX_PUSH("EVICT[BATCH] D2H");
+            NVTX_PUSH((cfg_label + ": EVICT D2H").c_str());
             cudaMemcpyAsync(batch_host, dev_stage, total_bytes, cudaMemcpyDeviceToHost, cs);
             cudaStreamSynchronize(cs);
             cudaStreamDestroy(cs);
@@ -364,7 +375,7 @@ bool llama_kv_evict_mgr::do_evict(llama_seq_id seq_id) {
 
             // write slice-by-slice
             const double t_ssd_start = now_ms();
-            NVTX_PUSH("EVICT[BATCH] ssd_write");
+            NVTX_PUSH((cfg_label + ": EVICT ssd_write").c_str());
             {
                 size_t off2 = 0;
                 for (int32_t il : kv_.get_kv_model_layer_ids()) {
@@ -428,7 +439,7 @@ bool llama_kv_evict_mgr::do_evict(llama_seq_id seq_id) {
     // ─── BASELINE path ────────────────────────────────────────────────────────
     // Phase 1: GPU → CPU
     const double t_gpu2cpu_start = now_ms();
-    NVTX_PUSH("EVICT gpu2cpu");
+    NVTX_PUSH((cfg_label + ": EVICT gpu2cpu").c_str());
 
     // Allocate a flat host buffer for all K+V data
     void * flat_buf = nullptr;
@@ -483,7 +494,7 @@ bool llama_kv_evict_mgr::do_evict(llama_seq_id seq_id) {
 
     // Phase 2: write to SSD
     const double t_ssd_start = now_ms();
-    NVTX_PUSH("EVICT ssd_write");
+    NVTX_PUSH((cfg_label + ": EVICT ssd_write").c_str());
     bool write_ok = ssd_file_.write_kv(flat_buf, total_bytes, base);
     NVTX_POP();
     const double t_ssd_ms = elapsed_ms(t_ssd_start);
@@ -554,6 +565,13 @@ bool llama_kv_evict_mgr::do_restore(llama_seq_id seq_id) {
     const bool opt_prefetch   = (std::getenv("LLAMA_SSD_OPT_PREFETCH")!= nullptr);
     const bool opt_slab       = (std::getenv("LLAMA_SSD_OPT_SLAB")    != nullptr);
 
+    // build config label for NVTX markers
+    std::string cfg_label;
+    if (opt_prefetch)     { cfg_label = "OPT4_PREFETCH"; }
+    else if (opt_blob_read) { cfg_label = "OPT5_BLOB"; }
+    else if (opt_slab)    { cfg_label = "OPT1_SLAB"; }
+    else                  { cfg_label = "BASELINE"; }
+
     const double t_total_start = now_ms();
 
     auto it_e = evicted_map_.find(seq_id);
@@ -583,7 +601,7 @@ bool llama_kv_evict_mgr::do_restore(llama_seq_id seq_id) {
             auto pf = it_pf->second;
             prefetch_map_.erase(it_pf);
 
-            NVTX_PUSH("RESTORE[PREFETCH] wait");
+            NVTX_PUSH((cfg_label + ": RESTORE wait").c_str());
             while (!pf->ready.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
@@ -591,7 +609,7 @@ bool llama_kv_evict_mgr::do_restore(llama_seq_id seq_id) {
 
             if (pf->ok) {
                 const double t_scatter_start = now_ms();
-                NVTX_PUSH("RESTORE[PREFETCH] scatter");
+                NVTX_PUSH((cfg_label + ": RESTORE scatter").c_str());
                 do_scatter(pf->buf, new_cells, entry);
                 NVTX_POP();
                 const double t_scatter_ms = elapsed_ms(t_scatter_start);
@@ -617,14 +635,14 @@ bool llama_kv_evict_mgr::do_restore(llama_seq_id seq_id) {
         if (posix_memalign(&blob, 4096, aligned) != 0 || !blob) return false;
 
         const double t_ssd_start = now_ms();
-        NVTX_PUSH("RESTORE[BLOB] ssd_read");
+        NVTX_PUSH((cfg_label + ": RESTORE ssd_read").c_str());
         bool ok = ssd_file_.read_blob(blob, total, entry.ssd_base_offset);
         NVTX_POP();
         const double t_ssd_ms = elapsed_ms(t_ssd_start);
 
         if (!ok) { free(blob); return false; }
 
-        NVTX_PUSH("RESTORE[BLOB] scatter");
+        NVTX_PUSH((cfg_label + ": RESTORE scatter").c_str());
         do_scatter(blob, new_cells, entry);
         NVTX_POP();
         free(blob);
@@ -645,7 +663,7 @@ bool llama_kv_evict_mgr::do_restore(llama_seq_id seq_id) {
     // ─── BASELINE: per-layer read ─────────────────────────────────────────────
     {
         const double t_ssd_start = now_ms();
-        NVTX_PUSH("RESTORE ssd_read");
+        NVTX_PUSH((cfg_label + ": RESTORE ssd_read").c_str());
 
         // Read all data into a flat buffer, then scatter
         const size_t total   = entry.total_bytes;
@@ -659,7 +677,7 @@ bool llama_kv_evict_mgr::do_restore(llama_seq_id seq_id) {
 
         if (!ok) { free(flat_buf); return false; }
 
-        NVTX_PUSH("RESTORE scatter");
+        NVTX_PUSH((cfg_label + ": RESTORE scatter").c_str());
         do_scatter(flat_buf, new_cells, entry);
         NVTX_POP();
         free(flat_buf);
