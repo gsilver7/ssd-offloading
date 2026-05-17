@@ -39,6 +39,7 @@ public:
     int  try_evict(const std::vector<llama_seq_id> & active_seqs);
     bool ensure_restored(const std::vector<llama_seq_id> & seq_ids);
     bool is_evicted(llama_seq_id seq_id) const;
+    bool force_evict(llama_seq_id seq_id);
     void print_stats() const;
 
 private:

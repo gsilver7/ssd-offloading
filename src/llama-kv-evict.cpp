@@ -128,6 +128,12 @@ int llama_kv_evict_mgr::try_evict(const std::vector<llama_seq_id> & active_seqs)
     return do_evict(victim) ? 1 : 0;
 }
 
+bool llama_kv_evict_mgr::force_evict(llama_seq_id seq_id) {
+    if (seq_id < 0 || is_evicted(seq_id)) return false;
+    touch_seq(seq_id);
+    return do_evict(seq_id);
+}
+
 bool llama_kv_evict_mgr::ensure_restored(const std::vector<llama_seq_id> & seq_ids) {
     bool ok = true;
     for (llama_seq_id sid : seq_ids) {

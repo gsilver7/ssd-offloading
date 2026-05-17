@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include "llama-arch.h"
+#include "llama-kv-cache-iswa.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
 #include "llama-batch.h"
@@ -307,9 +308,19 @@ llama_context::llama_context(
         {
             const char * ssd_path = std::getenv("LLAMA_KV_SSD_PATH");
             if (ssd_path && ssd_path[0]) {
-                auto * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
+                llama_kv_cache * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
+                if (!kv_cache) {
+                    // Gemma3 and other SWA models use llama_kv_cache_iswa which wraps
+                    // two llama_kv_cache instances. Attach eviction to kv_base (non-SWA layers).
+                    auto * iswa = dynamic_cast<llama_kv_cache_iswa *>(memory.get());
+                    if (iswa) {
+                        kv_cache = iswa->get_base();
+                    }
+                }
                 if (kv_cache) {
                     kv_evict_mgr = std::make_unique<llama_kv_evict_mgr>(*kv_cache, ssd_path);
+                } else {
+                    LLAMA_LOG_WARN("%s: LLAMA_KV_SSD_PATH set but memory type is not supported — SSD offload disabled\n", __func__);
                 }
             }
         }
@@ -1772,16 +1783,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
         break;
     }
 
-    // update LRU timestamps
-    if (kv_evict_mgr) {
-        const auto & batch = balloc->get_batch();
-        for (int32_t i = 0; i < batch.n_tokens; ++i) {
-            for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
-                kv_evict_mgr->touch_seq(batch.seq_id[i][s]);
-            }
-        }
-    }
-
     // reserve output buffer
     if (output_reserve(n_outputs_all) < n_outputs_all) {
         LLAMA_LOG_ERROR("%s: could not reserve space for batch with %d outputs\n", __func__, n_outputs_all);
@@ -1961,6 +1962,22 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
         n_outputs_prev += n_outputs;
     } while (mctx->next());
+
+    // update LRU timestamps + optional force-evict (must run AFTER mctx->apply() commits cells)
+    if (kv_evict_mgr) {
+        const auto & batch = balloc->get_batch();
+        for (int32_t i = 0; i < batch.n_tokens; ++i) {
+            for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
+                kv_evict_mgr->touch_seq(batch.seq_id[i][s]);
+            }
+        }
+
+        // LLAMA_SSD_FORCE_EVICT=<seq_id>: immediately write that seq to SSD
+        const char * force_env = std::getenv("LLAMA_SSD_FORCE_EVICT");
+        if (force_env) {
+            kv_evict_mgr->force_evict((llama_seq_id)std::atoi(force_env));
+        }
+    }
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
